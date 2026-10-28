@@ -88,4 +88,7 @@ Before submission, run `pdffonts fig.pdf`. The embedded family must not be `Nimb
 - [ ] The rerun command reproduces the asset from a clean shell.
 - [ ] The caption is synced; the artwork contains no prose title; panel letters match the caption.
 - [ ] Palette and fonts pass (`pdffonts`).
+- [ ] Figure numbers match the intended order: LaTeX numbers figures by where their environments sit in the
+      source, so place each one right after its first citation (an overview figure cited in the introduction goes
+      in the introduction, not at the top of the methods).
 - [ ] The `.tex` compiles locally with no undefined references.
