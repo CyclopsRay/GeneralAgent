@@ -35,7 +35,7 @@ instead of silently picking one.
 | Mode | Reader | Rule | Detail |
 |---|---|---|---|
 | Code | future maintainers | runs, is reviewed, is committed | §4 |
-| Figure | paper readers | trackable and unified | [references/figures.md](references/figures.md) |
+| Figure | paper readers | trackable and unified; names only in the artwork, prose in the caption; one dossier `.md` per figure (caption, how the paper cites it, generator scripts) | [references/figures.md](references/figures.md) |
 | Report | you, collaborators, PI deciding what is true | faithful: wins **and** losses, failures, caveats | [references/writing.md](references/writing.md) |
 | Paper | reviewers, journal readers | press-conference framing, no defensive wording, numbers unchanged | [references/writing.md](references/writing.md) |
 

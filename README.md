@@ -17,7 +17,7 @@ GeneralAgent/
 ├── SKILL.md                         core rules (loaded when the skill triggers)
 ├── references/
 │   ├── delegation.md                Codex routing, traps, spec template, review, Claude subagents
-│   ├── figures.md                   figure standard, font gate
+│   ├── figures.md                   figure standard: names-only artwork, per-figure dossier, font gate
 │   ├── writing.md                   report mode vs paper mode
 │   └── new-agent-checklist.md       setting up another agent
 ├── scripts/codex_run.sh             Codex wrapper (roles, sandbox flags, logs, changed files)
