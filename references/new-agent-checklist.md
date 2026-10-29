@@ -5,23 +5,25 @@ each one into the instruction files so no later session hits it again.
 
 ## 1. Budget and roles
 
-- [ ] Decide which tokens are scarce (Claude, Codex, or neither). That decides who types code.
-- [ ] Write the division of labor and the routing table into the global instruction file (§3).
+- [ ] Decide which tokens are scarce (Claude, Codex, or neither). Delegation stays optional either way.
+- [ ] Write the division of labor, the three model tiers and the `k2` fallback into the global
+      instruction file (§3). The global file wins over this skill on any conflict.
 
 ## 2. Probe the environment and record the results
 
 ```bash
-CODEX=$(ls -d ~/.vscode-server/extensions/openai.chatgpt-*/bin/*/codex | sort -V | tail -1); echo "$CODEX"
-"$CODEX" --version && "$CODEX" debug models | head      # which model names this plan has
-scripts/codex_run.sh --role code --effort low --cd "$(mktemp -d)" "Reply OK. Edit nothing."
-quota -s; df -h "$HOME" /scratch 2>/dev/null            # where big outputs may go
+command -v codex; codex-models                          # binary and the models this plan has
+scripts/codex_run.sh --role search --cd "$(mktemp -d)" "Reply OK. Edit nothing."; echo "exit=$?"
+k2 --health; echo "k2=$?"                               # fallback provider
+du -sh "$HOME"; df -h /nfs-stor/$USER                   # quota is enforced server-side on NFS
 module avail 2>&1 | head; conda env list                # software stack
 which pdflatex pdffonts; fc-match Arial                 # LaTeX, fonts (Nimbus Sans = no Arial)
 git config user.name; git config user.email
 ```
 
-- [ ] The Codex smoke test prints a `session_id` and exits 0. If it fails with `bwrap … No space
-      left on device`, the sandbox needs network access (the wrapper already sets it).
+- [ ] The Codex smoke test prints a `session_id` and exits 0 (a real round trip; `--version` proves
+      nothing). Exit 3 means unavailable: record why and confirm `k2 --health`. If a `--write` run
+      fails with `bwrap … No space left on device`, add `--network`.
 - [ ] Record the scheduler (SLURM partitions, accounts), scratch paths, and quotas in the global
       instructions.
 - [ ] Note symlinked paths (`readlink -f`). Codex trust entries need the resolved path.
@@ -32,9 +34,10 @@ git config user.name; git config user.email
       the delegation workflow. Minimal starting point:
       ```markdown
       # Working with Codex
-      Claude usage is scarce; Codex is not. Claude designs and reviews; Codex implements.
+      Claude designs and reviews; Codex may implement. Delegation is optional.
       Use the GeneralAgent skill for routing, invocation, and the delegation loop.
-      Always pass Codex a model and effort explicitly. Never use danger-full-access.
+      Always pass Codex a model and effort explicitly; keep its stdout visible.
+      Fall back to `k2` only when Codex is unavailable. Never use danger-full-access.
       Scientific correctness is Claude's responsibility; Codex passing its own tests is not evidence.
       ```
 - [ ] `~/.codex/AGENTS.md`: the same contract from the implementer's side. Stay inside the files
@@ -42,7 +45,8 @@ git config user.name; git config user.email
       test to make it pass.
 - [ ] Project `CLAUDE.md` plus `AGENTS.md` (a symlink to it is fine) in each repo: what the repo is,
       live versus frozen files, sibling code repos, build and compile commands, domain traps, commit
-      rules, and a pointer to the figure standard.
+      rules, and a pointer to the figure standard. Next to it `ONGOING.md`, `KNOWLEDGE.md`,
+      `PLAN.md`, and a git-tracked `report/` for the weekly report/record pairs (`research-week`).
 
 ## 4. Skills
 
@@ -75,11 +79,12 @@ git config user.name; git config user.email
 
 - [ ] Every project is a git repo, manuscripts included, and `.gitignore` covers build output.
 - [ ] Figure projects have `figures/` dossiers, a `FIGURE_PROVENANCE.md`, and a caption sync script.
-- [ ] Commit rules are written into the project instructions (named paths only, no push).
+- [ ] Commit rules are written into the project instructions (commit only when asked, named paths
+      only, no push without asking).
 
 ## 8. End-to-end dry run
 
 Give the new agent one small real task and watch the whole loop: mode chosen → spec written →
-Codex run in the background → diff reviewed → fix sent via `--resume` → commit of named files only
-→ final message listing what was verified and what was not. Anything that went wrong goes into the
+Codex run with visible output → diff reviewed → fix sent via `--resume` → commit of named files
+only, if the user asked → final message listing what was verified and what was not. Anything that went wrong goes into the
 instructions before real work starts.

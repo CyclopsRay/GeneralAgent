@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Safe wrapper for delegating work to Codex. ACCRE needs sandbox network access:
-# otherwise bwrap cannot create its disabled-network namespace and misleadingly
-# reports "No space left on device"; workspace-write still blocks outside writes.
+# Safe wrapper for delegating work to Codex. Follows the global rules in
+# ~/.claude/CLAUDE.md: explicit model and effort, detailed reasoning summary,
+# read-only sandbox unless --write, stdout kept visible (tee'd to the log),
+# and a distinct exit code when Codex is unavailable so the caller can fall
+# back to `k2` at the matching tier.
 set -euo pipefail
 
 usage() {
@@ -10,19 +12,33 @@ Usage: codex_run.sh [options] (PROMPT | -)
   --role code|think|search   default: code
   --model M                  override the role's model
   --effort E                 low|medium|high|xhigh|max|ultra
+  --write                    workspace-write sandbox (default: read-only)
+  --network                  allow network inside the write sandbox; needed on
+                             clusters without network namespaces (bwrap reports
+                             "No space left on device")
+  --timeout SECS             kill Codex after SECS of wall time (exit 124)
   --cd DIR                   working directory (default: $PWD; must exist)
-  --out DIR                  output directory (default: ${TMPDIR:-/tmp}/codex_runs/...)
+  --out DIR                  output directory (default: $CODEX_RUNS_DIR, else
+                             /nfs-stor/$USER/ai-history/codex-runs, else $TMPDIR)
   --resume SESSION_ID        continue an existing session
   --dry-run                  print the fully quoted command and exit
   -h, --help                 show this help
 
 PROMPT of "-" reads the prompt from stdin.
+Exit 3 means Codex is unavailable (missing binary, spend cap, auth, quota,
+rate limit, 5xx, network): fall back to `k2` at the matching tier.
 EOF
 }
 
 die_usage() {
   printf 'codex_run.sh: %s\nTry codex_run.sh --help for usage.\n' "$1" >&2
   exit 2
+}
+
+unavailable() {
+  printf 'codex_unavailable: %s\n' "$1"
+  printf 'fallback: k2 %s   (check first: k2 --health)\n' "$k2_tier"
+  exit 3
 }
 
 quote_command() {
@@ -67,12 +83,12 @@ discover_codex() {
   done
   printf 'codex_run.sh: no executable Codex CLI found; tried:\n' >&2
   printf '  - %s\n' "${tried[@]}" >&2
-  exit 1
+  return 1
 }
 
-role=code model_override= effort_override= out_dir= resume_id= prompt=
+role=code model_override= effort_override= out_dir= resume_id= prompt= timeout_s=
 work_dir=$PWD
-dry_run=0 have_prompt=0 role_set=0 model_set=0 resume_set=0
+dry_run=0 have_prompt=0 role_set=0 model_set=0 resume_set=0 write=0 network=0
 for raw_arg in "$@"; do
   case $raw_arg in
     --dangerously-bypass-approvals-and-sandbox|danger-full-access)
@@ -81,15 +97,18 @@ for raw_arg in "$@"; do
 done
 while (( $# )); do
   case $1 in
-    --role|--model|--effort|--cd|--out|--resume)
+    --role|--model|--effort|--cd|--out|--resume|--timeout)
       option=$1
       (( $# >= 2 )) || die_usage "$option requires a value"
       case $option in
         --role) role=$2; role_set=1 ;; --model) model_override=$2; model_set=1 ;;
         --effort) effort_override=$2 ;; --cd) work_dir=$2 ;;
         --out) out_dir=$2 ;; --resume) resume_id=$2; resume_set=1 ;;
+        --timeout) timeout_s=$2 ;;
       esac
       shift 2 ;;
+    --write) write=1; shift ;;
+    --network) network=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -)
@@ -109,15 +128,22 @@ done
 if [[ -n "$resume_id" ]] && (( ! role_set && ! model_set )); then
   die_usage 'resume requires --role or --model matching the original session'
 fi
+(( ! network || write )) || die_usage '--network only applies with --write'
+[[ -z "$timeout_s" || "$timeout_s" =~ ^[1-9][0-9]*$ ]] || die_usage "bad timeout: $timeout_s"
 work_dir=$(cd "$work_dir" && pwd -P)
 
+# Tiers from ~/.claude/CLAUDE.md (authoritative; run `codex-models` to check).
 search_flag=0
 case $role in
-  code) model=${CODEX_CODE_MODEL:-gpt-5.6-sol}; effort=${CODEX_CODE_EFFORT:-high} ;;
-  think) model=${CODEX_THINK_MODEL:-gpt-6-astra}; effort=${CODEX_THINK_EFFORT:-xhigh} ;;
+  code)
+    model=${CODEX_CODE_MODEL:-gpt-5.6-sol}; effort=${CODEX_CODE_EFFORT:-xhigh}
+    k2_tier='-e high' ;;
+  think)
+    model=${CODEX_THINK_MODEL:-gpt-6-astra}; effort=${CODEX_THINK_EFFORT:-xhigh}
+    k2_tier='-e high' ;;
   search)
-    model=${CODEX_SEARCH_MODEL:-gpt-5.6-terra}
-    effort=${CODEX_SEARCH_EFFORT:-max}; search_flag=1 ;;
+    model=${CODEX_SEARCH_MODEL:-gpt-5.6-terra}; effort=${CODEX_SEARCH_EFFORT:-high}
+    k2_tier='-e low (or -e medium)'; search_flag=1 ;;
   *) die_usage "bad role: $role" ;;
 esac
 [[ -n "$model_override" ]] && model=$model_override
@@ -126,7 +152,14 @@ esac
 case $effort in low|medium|high|xhigh|max|ultra) ;; *) die_usage "bad effort: $effort" ;; esac
 
 if [[ -z "$out_dir" ]]; then
-  out_parent=${TMPDIR:-/tmp}/codex_runs
+  out_parent=${CODEX_RUNS_DIR:-}
+  if [[ -z "$out_parent" ]]; then
+    if [[ -d /nfs-stor/$USER/ai-history ]]; then
+      out_parent=/nfs-stor/$USER/ai-history/codex-runs
+    else
+      out_parent=${TMPDIR:-/tmp}/codex_runs
+    fi
+  fi
   out_template=$out_parent/$(date +%Y%m%d-%H%M%S)-$role-XXXXXX
   if (( dry_run )); then
     out_dir=$out_template
@@ -138,20 +171,25 @@ elif [[ $out_dir != /* ]]; then
   out_dir=$PWD/$out_dir
 fi
 
-codex_bin=$(discover_codex)
-declare -a command=("$codex_bin")
+codex_bin=$(discover_codex) || unavailable 'no Codex binary'
+
+if (( write )); then sandbox=workspace-write; else sandbox=read-only; fi
+declare -a sandbox_cfg=(-c "sandbox_mode=\"$sandbox\"")
+(( network )) && sandbox_cfg+=(-c sandbox_workspace_write.network_access=true)
+declare -a common=(-m "$model"
+  -c "model_reasoning_effort=\"$effort\""
+  -c 'model_reasoning_summary="detailed"'
+  "${sandbox_cfg[@]}"
+  -o "$out_dir/last.txt" "$prompt")
+
+declare -a command=()
+[[ -n "$timeout_s" ]] && command+=(timeout "$timeout_s")
+command+=("$codex_bin")
 (( search_flag )) && command+=(--search)
 if [[ -n "$resume_id" ]]; then
-  command+=(exec resume --skip-git-repo-check "$resume_id" -m "$model"
-    -c "model_reasoning_effort=\"$effort\""
-    -c 'sandbox_mode="workspace-write"'
-    -c sandbox_workspace_write.network_access=true
-    -o "$out_dir/last.txt" "$prompt")
+  command+=(exec resume --skip-git-repo-check "$resume_id" "${common[@]}")
 else
-  command+=(exec --skip-git-repo-check -C "$work_dir" -m "$model"
-    -c "model_reasoning_effort=\"$effort\""
-    -s workspace-write -c sandbox_workspace_write.network_access=true
-    -o "$out_dir/last.txt" "$prompt")
+  command+=(exec --skip-git-repo-check -C "$work_dir" "${common[@]}")
 fi
 
 if (( dry_run )); then
@@ -172,13 +210,14 @@ run_command() {
   [[ -z "$resume_id" ]] || cd "$work_dir" || return
   "${command[@]}"
 }
+# Output stays visible and is also logged. The exit status is Codex's, not tee's.
 set +e
 if [[ $prompt == - ]]; then
-  (run_command) >>"$out_dir/codex.log" 2>&1
+  (run_command) 2>&1 | tee -a "$out_dir/codex.log"
 else
-  (run_command) </dev/null >>"$out_dir/codex.log" 2>&1
+  (run_command) </dev/null 2>&1 | tee -a "$out_dir/codex.log"
 fi
-codex_status=$?
+codex_status=${PIPESTATUS[0]}
 set -e
 
 if (( in_git )); then
@@ -192,7 +231,18 @@ session_id=$(sed -nE \
 session_id=${session_id:-unknown}
 changed_count=$(wc -l <"$out_dir/changed_files.txt")
 changed_count=${changed_count//[[:space:]]/}
-printf 'exit: %s\nsession_id: %s\n' "$codex_status" "$session_id"
+printf '\nexit: %s\nsession_id: %s\n' "$codex_status" "$session_id"
 printf 'last_message: %s\nlog: %s\n' "$out_dir/last.txt" "$out_dir/codex.log"
 printf 'changed_files: %s (%s)\n' "$out_dir/changed_files.txt" "$changed_count"
+
+if (( codex_status == 124 )) && [[ -n "$timeout_s" ]]; then
+  unavailable "timed out after ${timeout_s}s"
+elif (( codex_status == 127 )); then
+  unavailable 'binary failed to launch (exit 127)'
+elif (( codex_status != 0 )); then
+  reason=$(tail -n 40 "$out_dir/codex.log" | grep -m1 -oiE \
+    'spend cap|usage limit|quota|rate.?limit|429|401|unauthori[sz]ed|login|expired|5[0-9][0-9] [A-Za-z]|stream disconnected|connection (refused|reset)|network error' ||
+    true)
+  [[ -z "$reason" ]] || unavailable "$reason"
+fi
 exit "$codex_status"
